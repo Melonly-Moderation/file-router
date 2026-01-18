@@ -1,23 +1,17 @@
-FROM golang:alpine AS builder
+FROM alpine:latest AS builder
+
+RUN apk add --no-cache gcc musl-dev
 
 WORKDIR /app
 
-COPY go.mod ./
+COPY main.c .
 
-RUN go mod download
+RUN gcc -O2 -static -o main main.c
 
-COPY . .
+FROM scratch
 
-RUN go build -o main .
-
-FROM alpine:latest
-
-RUN apk --no-cache add ca-certificates
-
-WORKDIR /root/
-
-COPY --from=builder /app/main .
+COPY --from=builder /app/main /main
 
 EXPOSE 8080
 
-CMD ["./main"]
+ENTRYPOINT ["/main"]
