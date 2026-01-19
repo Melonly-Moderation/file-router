@@ -13,11 +13,9 @@
 #define PORT 8080
 #define MAX_ID_LENGTH 100
 #define BUFFER_SIZE 65536
-#define IMAGE_BUFFER_SIZE (10 * 1024 * 1024)
+#define STREAM_BUFFER_SIZE 8192
 #define CDN_HOST "cdn_zipline"
 #define CDN_PORT 3000
-
-static char image_buffer[IMAGE_BUFFER_SIZE];
 
 static int is_valid_id(const char *id, size_t len) {
     if (len == 0 || len > MAX_ID_LENGTH) return 0;
@@ -65,7 +63,7 @@ static int connect_to_cdn(void) {
     return sock;
 }
 
-static int fetch_image(const char *path, size_t *out_size, char *content_type, size_t ct_size) {
+static int fetch_image_stream(int client, const char *path) {
     int sock = connect_to_cdn();
     if (sock < 0) return -1;
     
@@ -106,7 +104,8 @@ static int fetch_image(const char *path, size_t *out_size, char *content_type, s
         close(sock);
         return -1;
     }
-    
+
+    char content_type[128];
     content_type[0] = '\0';
     char *ct = strcasestr(header_buf, "Content-Type:");
     if (ct) {
@@ -115,7 +114,7 @@ static int fetch_image(const char *path, size_t *out_size, char *content_type, s
         char *end = strpbrk(ct, "\r\n");
         if (end) {
             size_t len = end - ct;
-            if (len >= ct_size) len = ct_size - 1;
+            if (len >= sizeof(content_type)) len = sizeof(content_type) - 1;
             memcpy(content_type, ct, len);
             content_type[len] = '\0';
         }
@@ -125,35 +124,73 @@ static int fetch_image(const char *path, size_t *out_size, char *content_type, s
         close(sock);
         return -1;
     }
-    
-    size_t total = 0;
-    while (total < IMAGE_BUFFER_SIZE) {
-        ssize_t n = recv(sock, image_buffer + total, IMAGE_BUFFER_SIZE - total, 0);
-        if (n <= 0) break;
-        total += n;
+
+    size_t content_length = 0;
+    char *cl = strcasestr(header_buf, "Content-Length:");
+    if (cl) {
+        cl += 15;
+        while (*cl == ' ') cl++;
+        content_length = (size_t)strtoull(cl, NULL, 10);
     }
-    
+    if (content_length == 0) {
+        close(sock);
+        return -1;
+    }
+
+    char response_header[512];
+    int response_len = snprintf(response_header, sizeof(response_header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Cache-Control: public, max-age=3600\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Connection: close\r\n\r\n",
+        content_type, content_length);
+
+    if (send(client, response_header, response_len, 0) != response_len) {
+        close(sock);
+        return -1;
+    }
+
+    char buffer[STREAM_BUFFER_SIZE];
+    size_t total = 0;
+    while (total < content_length) {
+        size_t to_read = content_length - total;
+        if (to_read > sizeof(buffer)) to_read = sizeof(buffer);
+        ssize_t n = recv(sock, buffer, to_read, 0);
+        if (n <= 0) break;
+        size_t sent = 0;
+        while (sent < (size_t)n) {
+            ssize_t s = send(client, buffer + sent, (size_t)n - sent, 0);
+            if (s <= 0) {
+                close(sock);
+                return -1;
+            }
+            sent += (size_t)s;
+        }
+        total += (size_t)n;
+    }
+
     close(sock);
-    *out_size = total;
-    return (total > 0) ? 0 : -1;
+    return (total == content_length) ? 0 : -1;
 }
 
-static int try_fetch_with_extensions(const char *id, size_t *out_size, char *content_type, size_t ct_size) {
+static int try_fetch_with_extensions(int client, const char *id) {
     if (strchr(id, '/') != NULL || ends_with(id, ".webp") || ends_with(id, ".png") || 
         ends_with(id, ".jpg") || ends_with(id, ".jpeg")) {
-        return fetch_image(id, out_size, content_type, ct_size);
+        return fetch_image_stream(client, id);
     }
     
     char path[256];
     
     snprintf(path, sizeof(path), "%s.webp", id);
-    if (fetch_image(path, out_size, content_type, ct_size) == 0) return 0;
+    if (fetch_image_stream(client, path) == 0) return 0;
     
     snprintf(path, sizeof(path), "%s.png", id);
-    if (fetch_image(path, out_size, content_type, ct_size) == 0) return 0;
+    if (fetch_image_stream(client, path) == 0) return 0;
     
     snprintf(path, sizeof(path), "%s.jpg", id);
-    if (fetch_image(path, out_size, content_type, ct_size) == 0) return 0;
+    if (fetch_image_stream(client, path) == 0) return 0;
     
     return -1;
 }
@@ -199,31 +236,9 @@ static void handle_client(int client) {
         return;
     }
     
-    size_t image_size;
-    char content_type[128];
-    
-    if (try_fetch_with_extensions(id, &image_size, content_type, sizeof(content_type)) != 0) {
+    if (try_fetch_with_extensions(client, id) != 0) {
         send_404(client);
         return;
-    }
-    
-    char header[512];
-    int header_len = snprintf(header, sizeof(header),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %zu\r\n"
-        "Cache-Control: public, max-age=3600\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "Connection: close\r\n\r\n",
-        content_type, image_size);
-    
-    send(client, header, header_len, 0);
-    
-    size_t sent = 0;
-    while (sent < image_size) {
-        ssize_t s = send(client, image_buffer + sent, image_size - sent, 0);
-        if (s <= 0) break;
-        sent += s;
     }
 }
 
