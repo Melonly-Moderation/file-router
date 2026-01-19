@@ -12,12 +12,9 @@
 
 #define PORT 8080
 #define MAX_ID_LENGTH 100
-#define BUFFER_SIZE 65536
-#define IMAGE_BUFFER_SIZE (10 * 1024 * 1024)
 #define CDN_HOST "cdn_zipline"
 #define CDN_PORT 3000
 
-static char image_buffer[IMAGE_BUFFER_SIZE];
 
 static int is_valid_id(const char *id, size_t len) {
     if (len == 0 || len > MAX_ID_LENGTH) return 0;
@@ -65,13 +62,13 @@ static int connect_to_cdn(void) {
     return sock;
 }
 
-static int fetch_image(const char *path, size_t *out_size, char *content_type, size_t ct_size) {
+static int check_image_exists(const char *path, char *content_type, size_t ct_size) {
     int sock = connect_to_cdn();
     if (sock < 0) return -1;
     
     char request[512];
     int req_len = snprintf(request, sizeof(request),
-        "GET /u/%s HTTP/1.1\r\nHost: %s:%d\r\nConnection: close\r\n\r\n",
+        "HEAD /u/%s HTTP/1.1\r\nHost: %s:%d\r\nConnection: close\r\n\r\n",
         path, CDN_HOST, CDN_PORT);
     
     if (send(sock, request, req_len, 0) != req_len) {
@@ -125,35 +122,40 @@ static int fetch_image(const char *path, size_t *out_size, char *content_type, s
         close(sock);
         return -1;
     }
-    
-    size_t total = 0;
-    while (total < IMAGE_BUFFER_SIZE) {
-        ssize_t n = recv(sock, image_buffer + total, IMAGE_BUFFER_SIZE - total, 0);
-        if (n <= 0) break;
-        total += n;
-    }
-    
+
     close(sock);
-    *out_size = total;
-    return (total > 0) ? 0 : -1;
+    return 0;
 }
 
-static int try_fetch_with_extensions(const char *id, size_t *out_size, char *content_type, size_t ct_size) {
+static int try_check_with_extensions(const char *id, char *content_type, size_t ct_size, char *out_path, size_t out_path_size) {
     if (strchr(id, '/') != NULL || ends_with(id, ".webp") || ends_with(id, ".png") || 
         ends_with(id, ".jpg") || ends_with(id, ".jpeg")) {
-        return fetch_image(id, out_size, content_type, ct_size);
+        if (check_image_exists(id, content_type, ct_size) == 0) {
+            snprintf(out_path, out_path_size, "%s", id);
+            return 0;
+        }
+        return -1;
     }
     
     char path[256];
     
     snprintf(path, sizeof(path), "%s.webp", id);
-    if (fetch_image(path, out_size, content_type, ct_size) == 0) return 0;
+    if (check_image_exists(path, content_type, ct_size) == 0) {
+        snprintf(out_path, out_path_size, "%s", path);
+        return 0;
+    }
     
     snprintf(path, sizeof(path), "%s.png", id);
-    if (fetch_image(path, out_size, content_type, ct_size) == 0) return 0;
+    if (check_image_exists(path, content_type, ct_size) == 0) {
+        snprintf(out_path, out_path_size, "%s", path);
+        return 0;
+    }
     
     snprintf(path, sizeof(path), "%s.jpg", id);
-    if (fetch_image(path, out_size, content_type, ct_size) == 0) return 0;
+    if (check_image_exists(path, content_type, ct_size) == 0) {
+        snprintf(out_path, out_path_size, "%s", path);
+        return 0;
+    }
     
     return -1;
 }
@@ -199,32 +201,25 @@ static void handle_client(int client) {
         return;
     }
     
-    size_t image_size;
     char content_type[128];
-    
-    if (try_fetch_with_extensions(id, &image_size, content_type, sizeof(content_type)) != 0) {
+    char resolved_path[256];
+
+    if (try_check_with_extensions(id, content_type, sizeof(content_type), resolved_path, sizeof(resolved_path)) != 0) {
         send_404(client);
         return;
     }
-    
+
     char header[512];
     int header_len = snprintf(header, sizeof(header),
-        "HTTP/1.1 200 OK\r\n"
+        "HTTP/1.1 302 Found\r\n"
+        "Location: http://%s:%d/u/%s\r\n"
         "Content-Type: %s\r\n"
-        "Content-Length: %zu\r\n"
-        "Cache-Control: public, max-age=3600\r\n"
+        "Cache-Control: no-store\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "Connection: close\r\n\r\n",
-        content_type, image_size);
-    
+        CDN_HOST, CDN_PORT, resolved_path, content_type);
+
     send(client, header, header_len, 0);
-    
-    size_t sent = 0;
-    while (sent < image_size) {
-        ssize_t s = send(client, image_buffer + sent, image_size - sent, 0);
-        if (s <= 0) break;
-        sent += s;
-    }
 }
 
 int main(void) {
