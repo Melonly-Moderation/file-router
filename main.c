@@ -181,6 +181,8 @@ static int try_fetch_with_extensions(int client, const char *id) {
         return fetch_image_stream(client, id);
     }
     
+    if (fetch_image_stream(client, id) == 0) return 0;
+    
     char path[256];
     
     snprintf(path, sizeof(path), "%s.webp", id);
