@@ -153,12 +153,14 @@ name = "file-router"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bytes",
  "dotenvy",
  "futures-util",
  "http",
  "reqwest",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tower-http",
  "tracing",
  "tracing-subscriber",
