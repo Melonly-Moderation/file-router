@@ -1,17 +1,17 @@
-FROM alpine:latest AS builder
+FROM cgr.dev/chainguard/rust:latest-dev AS build
 
-RUN apk add --no-cache gcc musl-dev
+WORKDIR /src
 
-WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
 
-COPY main.c .
+RUN cargo build --release --locked
 
-RUN gcc -O2 -static -o main main.c
+FROM cgr.dev/chainguard/glibc-dynamic:latest
 
-FROM scratch
+COPY --from=build /src/target/release/file-router /file-router
 
-COPY --from=builder /app/main /main
-
+USER 65532:65532
 EXPOSE 8080
 
-ENTRYPOINT ["/main"]
+ENTRYPOINT ["/file-router"]
